@@ -39,6 +39,9 @@ dat <- map_dfr(files, data.table::fread) %>%
             question_order,
             trial_type)) 
 
+n_subs <- length(unique(dat$sub_n))
+cat("\n===============\n",n_subs,"subjects\n===============\n")
+
 dat_clean <- dat %>%
   filter(trialType=="rating") %>%
   mutate(across(c(rt,response),as.numeric)) %>%
@@ -53,7 +56,7 @@ dat_clean <- dat %>%
 
 
 # Read in stimulus values
-stim <- read_csv(here("data","turtles_Spring2022","stim.csv"))
+stim <- readr::read_csv(here("data","turtles_Spring2022","stim.csv"))
 
 # angle-radius values as character string
 ang_rad <- as.character(unite(stim,"ang_rad",c(angle,radius),sep="_")$ang_rad)
@@ -83,7 +86,7 @@ for (s1 in ang_rad) {
 
 
 # MDS =====================================================================
-fit <- MASS::isoMDS(dissim_mat, k=2)
+fit <- MASS::isoMDS(dissim_mat, k=2, trace=T)
 fit
 
 MDS_points <- tibble(
@@ -91,27 +94,64 @@ MDS_points <- tibble(
   radius=fit$points[,2]
 )
 
+mds_mat <- matrix(c(MDS_points$angle,
+                    MDS_points$radius),
+                  ncol=2)
+
+# Transform function
+mds_transform <- function(mds_mat) {
+  
+  # Reflection matrix
+  ref_mat <- matrix(c(0,1,1,0), nrow=2, ncol=2, byrow=TRUE)
+  
+  mds_mat_Ref <- mds_mat %*% ref_mat
+  
+  # Return transformed matrix
+  return(mds_mat_Ref)
+  
+}
 
 # PLOTTING =====================================================================
-MDS_plot <- ggplot(MDS_points, aes(angle,radius))+
-  geom_point(alpha=.8,col="#00BDD0",size=3.5)+
-  coord_fixed(xlim=c(-4,4),ylim=c(-4,4))+
-  labs(title="MDS Solution")+
+MDS_mat_reflected <- mds_transform(mds_mat)
+MDS_points_reflected <- tibble(
+  angle=MDS_mat_reflected[,1],
+  radius=MDS_mat_reflected[,2],
+  which=1:nrow(MDS_mat_reflected)
+)
+
+MDS_plot_orig <- MDS_points %>%
+  mutate(which=1:n()) %>%
+  ggplot(aes(angle,radius))+
+  geom_text(aes(label=which),alpha=.8,size=5)+
+  coord_fixed(xlim=c(-5,5),ylim=c(-5,5))+
+  labs(title="MDS Solution original")+
   ggthemes::theme_few()+
   theme(plot.title=element_text(hjust=0.5))
 
-orig_stim_plot <- ggplot(stim,aes(angle,radius))+
-  geom_point(alpha=.8,col="#00BDD0",size=3.5)+
-  coord_cartesian(xlim=c(10,40),ylim=c(30,140))+
+
+MDS_plot_reflected <- MDS_points_reflected %>%
+  mutate(which=1:n()) %>%
+  ggplot(aes(angle,radius))+
+  geom_text(aes(label=which),alpha=.8,size=5)+
+  coord_fixed(xlim=c(-5,5),ylim=c(-5,5))+
+  labs(title="MDS Solution reflected")+
+  ggthemes::theme_few()+
+  theme(plot.title=element_text(hjust=0.5))
+
+orig_stim_plot <- stim %>% 
+  mutate(which=1:n()) %>%
+  ggplot(aes(angle,radius))+
+  geom_text(aes(label=which),alpha=.8,size=6)+
+  coord_cartesian(xlim=range(stim$angle),
+                  ylim=range(stim$radius))+
   labs(title="Raw Stimulus Values")+
   ggthemes::theme_few()+
   theme(plot.title=element_text(hjust=0.5))
 
-all_plot <- orig_stim_plot/MDS_plot
+all_plot <- orig_stim_plot|(MDS_plot_orig/MDS_plot_reflected)
 all_plot
 
 if(save_plot){
   ggsave(here("R","plots","MDS_Plots.pdf"),all_plot)
 }
-
 
