@@ -13,6 +13,7 @@ library(tidyr)
 library(fs)
 library(purrr)
 library(patchwork)
+library(readr)
 
 # controls
 save_plot <- T
@@ -26,8 +27,7 @@ if("MASS" %in% (.packages())){
 
 # Read in and clean raw data files
 files <- dir_ls(here("data","turtles_Spring2022","raw"))
-dat <- map_dfr(files, data.table::fread) %>%
-  as_tibble() %>%
+dat <- map_dfr(files, ~data.table::fread(.x) %>% as_tibble()) %>% 
   select(-c(internal_node_id,
             success,
             timeout,
@@ -42,6 +42,7 @@ dat <- map_dfr(files, data.table::fread) %>%
 n_subs <- length(unique(dat$sub_n))
 cat("\n===============\n",n_subs,"subjects\n===============\n")
 
+# clean data for MDS stuff
 dat_clean <- dat %>%
   filter(trialType=="rating") %>%
   mutate(across(c(rt,response),as.numeric)) %>%
@@ -56,7 +57,8 @@ dat_clean <- dat %>%
 
 
 # Read in stimulus values
-stim <- readr::read_csv(here("data","turtles_Spring2022","stim.csv"))
+stim <- readr::read_csv(here("data","turtles_Spring2022","stim.csv")) %>% 
+  mutate(which=1:n()) 
 
 # angle-radius values as character string
 ang_rad <- as.character(unite(stim,"ang_rad",c(angle,radius),sep="_")$ang_rad)
@@ -75,7 +77,7 @@ for (s1 in ang_rad) {
       resp<-0
     } else {
       resp <- dat_clean[(dat_clean$turtle_a==s1 & dat_clean$turtle_b==s2) |
-                        (dat_clean$turtle_a==s2 & dat_clean$turtle_b==s1), ]$dissim
+                          (dat_clean$turtle_a==s2 & dat_clean$turtle_b==s1), ]$dissim
     }
     dissim_mat[s1_num, s2_num]<-mean(resp)
     dissim_mat[s2_num, s1_num]<-mean(resp)
@@ -86,72 +88,119 @@ for (s1 in ang_rad) {
 
 
 # MDS =====================================================================
-fit <- MASS::isoMDS(dissim_mat, k=2, trace=T)
-fit
+mds_fit <- MASS::isoMDS(dissim_mat)
+mds_fit
 
 MDS_points <- tibble(
-  angle=fit$points[,1],
-  radius=fit$points[,2]
+  angle=mds_fit$points[,1],
+  radius=mds_fit$points[,2]
 )
 
+# Get mds matrix (original)
 mds_mat <- matrix(c(MDS_points$angle,
                     MDS_points$radius),
                   ncol=2)
 
+# Functions for transforming 
 # Transform function
-mds_transform <- function(mds_mat) {
+mds_transform <- function(mds_mat, s, theta, t_x, t_y) {
   
   # Reflection matrix
   ref_mat <- matrix(c(0,1,1,0), nrow=2, ncol=2, byrow=TRUE)
   
+  # Rotation matrix
+  rot_mat <- matrix(c(cos(theta),-sin(theta),sin(theta),cos(theta)), nrow=2, ncol=2, byrow=TRUE)
+  
+  # Reflection 1 
   mds_mat_Ref <- mds_mat %*% ref_mat
+ 
+  # Rotation
+  mds_mat_r <- mds_mat_Ref %*% rot_mat
+  
+  # Scaling
+  mds_mat_s_r <- mds_mat_r*s
+  
+  # Translate
+  mds_mat_t_s_r <- matrix(c(mds_mat_s_r[,1]+t_x,
+                            mds_mat_s_r[,2]+t_y),
+                          ncol=2)
   
   # Return transformed matrix
-  return(mds_mat_Ref)
+  return(mds_mat_t_s_r)
   
 }
 
+# get ss
+cost <- function(params, stim_mat, mds_mat){
+  s <- params[1]
+  theta <- params[2]
+  t_x <- params[3]
+  t_y <- params[4]
+  mds_transformed <- mds_transform(mds_mat, s, theta, t_x, t_y)
+  ss <- sum((stim_mat-mds_transformed)^2)
+  return(ss)
+}
+
+# starting params
+s_params <- c(0, 0, 1, 0)
+
+# fit model
+fit <- optim(par=s_params, 
+             fn=cost, 
+             method='L-BFGS-B',
+             lower=c(-100, -100, -10, -2*pi), 
+             upper=c( 100,  100,  10,  2*pi),
+             stim_mat=matrix(c(stim$angle,stim$radius),ncol=2),
+             mds_mat=mds_mat)
+
 # PLOTTING =====================================================================
-MDS_mat_reflected <- mds_transform(mds_mat)
-MDS_points_reflected <- tibble(
-  angle=MDS_mat_reflected[,1],
-  radius=MDS_mat_reflected[,2],
-  which=1:nrow(MDS_mat_reflected)
+MDS_mat_transf <- mds_transform(mds_mat, fit$par[1], fit$par[2], fit$par[3], fit$par[4])
+MDS_points_transf <- tibble(
+  angle=MDS_mat_transf[,1],
+  radius=MDS_mat_transf[,2],
+  which=1:nrow(MDS_mat_transf)
 )
 
 MDS_plot_orig <- MDS_points %>%
   mutate(which=1:n()) %>%
   ggplot(aes(angle,radius))+
-  geom_text(aes(label=which),alpha=.8,size=5)+
+  geom_text(aes(label=which),alpha=.8,size=3)+
   coord_fixed(xlim=c(-5,5),ylim=c(-5,5))+
   labs(title="MDS Solution original")+
   ggthemes::theme_few()+
   theme(plot.title=element_text(hjust=0.5))
 
-
-MDS_plot_reflected <- MDS_points_reflected %>%
+MDS_plot_transf <- MDS_points_transf %>%
   mutate(which=1:n()) %>%
   ggplot(aes(angle,radius))+
-  geom_text(aes(label=which),alpha=.8,size=5)+
-  coord_fixed(xlim=c(-5,5),ylim=c(-5,5))+
-  labs(title="MDS Solution reflected")+
+  geom_text(aes(label=which),alpha=.8,size=3)+
+  coord_cartesian(xlim=range(MDS_points_transf$angle),
+                  ylim=range(MDS_points_transf$radius))+
+  labs(title="MDS Solution transformed")+
   ggthemes::theme_few()+
   theme(plot.title=element_text(hjust=0.5))
 
-orig_stim_plot <- stim %>% 
-  mutate(which=1:n()) %>%
+orig_stim_plot <- stim %>%
   ggplot(aes(angle,radius))+
-  geom_text(aes(label=which),alpha=.8,size=6)+
+  geom_text(aes(label=which),alpha=.8,size=3)+
   coord_cartesian(xlim=range(stim$angle),
                   ylim=range(stim$radius))+
   labs(title="Raw Stimulus Values")+
   ggthemes::theme_few()+
   theme(plot.title=element_text(hjust=0.5))
 
-all_plot <- orig_stim_plot|(MDS_plot_orig/MDS_plot_reflected)
+all_plot <- orig_stim_plot|(MDS_plot_orig/MDS_plot_transf)
 all_plot
 
+# Save results ================================================================================
+# save plot
 if(save_plot){
-  ggsave(here("R","plots","MDS_Plots.pdf"),all_plot)
+  ggsave(here("R","plots","MDS_Plots.pdf"),all_plot,
+         width=8,height=8)
 }
+
+# save transformed mds coords
+write_csv(MDS_points_transf, file=here("R","mds_results","mds_turtles.csv"))
+write_csv(stim,file=here("R","mds_results","orig_turtles.csv"))
+
 
